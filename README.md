@@ -4,6 +4,7 @@ Automatically mirrors the [ABC rage playlist](https://www.abc.net.au/rage/playli
 
 - **ABC Rage H1 2026** — everything aired January–June 2026
 - **ABC Rage H2 2026** — everything aired July–December 2026
+- **ABC Rage H2 2026 New songs only** — only tracks that hadn't appeared on rage in the previous 12 months (one per half-year, alongside the main playlist)
 
 Everything runs on GitHub. A scheduled GitHub Actions workflow scrapes the rage playlist pages, matches each track on Spotify, adds it to the right playlist, and commits its state back to this repo. No servers, no database, nothing to host.
 
@@ -50,6 +51,7 @@ This dry-runs the scraper and prints what it finds without touching Spotify. If 
 ## Design notes
 
 - **State in the repo.** `data/state.json` records every processed track and its matched Spotify URI (or `null` for misses), so re-runs never duplicate work. Adds are additionally checked against the playlist's live contents.
+- **New-songs filter.** The state file keeps a per-song last-aired date. A track goes into the "New songs only" playlist when its last rage appearance is more than 12 months before the current airing (or it has never aired). Note the play history only reaches back as far as this repo has been syncing — early on, returning oldies may look "new" until history accumulates.
 - **Fuzzy matching.** Spotify search results are scored against the scraped artist/title (threshold 0.75). Below the threshold, the track is logged as unmatched rather than added wrongly.
 - **Polite scraping.** One fetch per episode page, a descriptive User-Agent, and a daily schedule. Be a good citizen of the ABC's servers.
 - **Rate limits.** Spotify 429s are honoured with `Retry-After`.
