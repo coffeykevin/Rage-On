@@ -10,9 +10,11 @@ on:
 permissions:
   contents: write
 
+# A hung run must not block tomorrow's scheduled run — state is saved
+# incrementally and committed with `if: always()`, so cancelling is safe.
 concurrency:
   group: sync
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   sync:

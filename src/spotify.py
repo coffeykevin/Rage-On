@@ -68,6 +68,15 @@ class Spotify:
             )
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", "2")) + 1
+                if wait > 300:
+                    # Dev-mode apps can get Retry-After values of many hours;
+                    # sleeping that long hangs the Actions job and blocks the
+                    # concurrency group. Bail out — state is saved by main()'s
+                    # finally, and the next scheduled run resumes from there.
+                    raise RuntimeError(
+                        f"Spotify rate limited: Retry-After {wait - 1}s "
+                        "exceeds the 300s wait budget; giving up this run"
+                    )
                 time.sleep(wait)
                 continue
             if resp.status_code == 401:
