@@ -47,6 +47,7 @@ def main() -> int:
     state: dict = load_json(STATE_PATH, {"processed": {}})
     unmatched: list = load_json(UNMATCHED_PATH, [])
     processed: dict = state["processed"]  # key -> spotify uri | null
+    playlists: dict = state.setdefault("playlists", {})  # name -> playlist id
 
     tracks = scrape_all()
     new_tracks = [t for t in tracks if t.key not in processed]
@@ -61,33 +62,39 @@ def main() -> int:
     existing_cache: dict[str, set[str]] = {}  # id -> uris already present
     added = matched_dupes = missed = 0
 
-    for t in new_tracks:
-        name = playlist_name(t.air_date)
-        if name not in playlist_cache:
-            pid = sp.find_or_create_playlist(name, PLAYLIST_DESCRIPTION)
-            playlist_cache[name] = pid
-            existing_cache[pid] = sp.playlist_track_uris(pid)
-        pid = playlist_cache[name]
+    # Save state even if the run dies partway — playlist creation and
+    # processed tracks must never be forgotten, or re-runs would duplicate.
+    try:
+        for t in new_tracks:
+            name = playlist_name(t.air_date)
+            if name not in playlist_cache:
+                pid = playlists.get(name)
+                if not pid:
+                    pid = sp.find_or_create_playlist(name, PLAYLIST_DESCRIPTION)
+                    playlists[name] = pid
+                playlist_cache[name] = pid
+                existing_cache[pid] = sp.playlist_track_uris(pid)
+            pid = playlist_cache[name]
 
-        uri = sp.match_track(t.artist, t.title)
-        if uri is None:
-            missed += 1
-            processed[t.key] = None
-            unmatched.append(t.to_dict())
-            print(f"  ✗ no match: {t.artist} — {t.title}")
-            continue
+            uri = sp.match_track(t.artist, t.title)
+            if uri is None:
+                missed += 1
+                processed[t.key] = None
+                unmatched.append(t.to_dict())
+                print(f"  ✗ no match: {t.artist} — {t.title}")
+                continue
 
-        if uri in existing_cache[pid]:
-            matched_dupes += 1
-        else:
-            sp.add_tracks(pid, [uri])
-            existing_cache[pid].add(uri)
-            added += 1
-            print(f"  ✓ {name}: {t.artist} — {t.title}")
-        processed[t.key] = uri
-
-    save_json(STATE_PATH, state)
-    save_json(UNMATCHED_PATH, unmatched)
+            if uri in existing_cache[pid]:
+                matched_dupes += 1
+            else:
+                sp.add_tracks(pid, [uri])
+                existing_cache[pid].add(uri)
+                added += 1
+                print(f"  ✓ {name}: {t.artist} — {t.title}")
+            processed[t.key] = uri
+    finally:
+        save_json(STATE_PATH, state)
+        save_json(UNMATCHED_PATH, unmatched)
     print(
         f"\nDone. Added {added}, already present {matched_dupes}, "
         f"unmatched {missed} (see data/unmatched.json)"

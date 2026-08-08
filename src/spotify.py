@@ -86,14 +86,26 @@ class Spotify:
         return self._user_id
 
     def find_or_create_playlist(self, name: str, description: str) -> str:
-        """Return the playlist ID for `name`, creating it (public) if needed."""
-        url = f"/users/{self.user_id}/playlists?limit=50"
-        while url:
-            page = self._request("GET", url)
-            for pl in page.get("items", []):
-                if pl and pl.get("name") == name:
-                    return pl["id"]
-            url = page.get("next")
+        """Return the playlist ID for `name`, creating it (public) if needed.
+
+        Listing uses /me/playlists; some development-mode apps get 403 on
+        listing endpoints, in which case we skip straight to creation (the
+        caller persists the ID in state.json, so this happens at most once
+        per playlist).
+        """
+        try:
+            url = "/me/playlists?limit=50"
+            while url:
+                page = self._request("GET", url)
+                for pl in page.get("items", []):
+                    if pl and pl.get("name") == name:
+                        return pl["id"]
+                url = page.get("next")
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            if status not in (403, 404):
+                raise
+            print(f"  ! listing playlists denied ({status}); creating directly")
         created = self._request(
             "POST",
             f"/users/{self.user_id}/playlists",
