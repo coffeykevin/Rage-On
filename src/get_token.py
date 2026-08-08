@@ -25,7 +25,10 @@ import requests
 CLIENT_ID = os.environ["SPOTIFY_CLIENT_ID"]
 CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
 REDIRECT = "http://127.0.0.1:8765/callback"
-SCOPE = "playlist-modify-public"
+# playlist-modify-private is ALSO needed to create playlists (Spotify treats
+# "public" as "shown on profile"; creation itself needs the private scope),
+# and playlist-read-private lets us list existing playlists.
+SCOPE = "playlist-modify-public playlist-modify-private playlist-read-private"
 
 code_holder: dict = {}
 state = secrets.token_urlsafe(16)

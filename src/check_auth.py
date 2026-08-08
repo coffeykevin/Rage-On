@@ -59,8 +59,13 @@ def main() -> int:
     if resp.ok:
         scope = resp.json().get("scope", "")
         print(f"\n✓ Auth works. Granted scope: {scope or '(none reported)'}")
-        if "playlist-modify-public" not in scope:
-            print("✗ …but scope lacks playlist-modify-public — re-run src.get_token")
+        missing = [
+            s
+            for s in ("playlist-modify-public", "playlist-modify-private")
+            if s not in scope
+        ]
+        if missing:
+            print(f"✗ …but scope lacks {' and '.join(missing)} — re-run src.get_token")
             return 1
         return 0
     print(f"\n✗ Spotify rejected the credentials ({resp.status_code}): {resp.text}")
