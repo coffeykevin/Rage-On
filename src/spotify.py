@@ -51,7 +51,9 @@ class Spotify:
             timeout=30,
         )
         resp.raise_for_status()
-        self._access_token = resp.json()["access_token"]
+        payload = resp.json()
+        self._access_token = payload["access_token"]
+        print(f"Token OK. Granted scope: {payload.get('scope') or '(none)'}")
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         self._ensure_token()
@@ -72,6 +74,8 @@ class Spotify:
                 self._access_token = None
                 self._ensure_token()
                 continue
+            if not resp.ok:
+                print(f"  ! {method} {url} -> {resp.status_code}: {resp.text[:300]}")
             resp.raise_for_status()
             return resp.json() if resp.text else {}
         resp.raise_for_status()
