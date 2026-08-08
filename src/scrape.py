@@ -1,17 +1,22 @@
 """
 Scraper for the ABC Rage playlist pages.
 
-The hub page (https://www.abc.net.au/rage/playlist) links to per-episode
-playlist pages, each tied to an air date. This module fetches the hub,
-discovers episode pages, and parses each into (artist, title, air_date)
-entries.
+Discovery (verified against the live site, Aug 2026):
+  1. The hub page (https://www.abc.net.au/rage/playlist) is a Next.js app.
+     Its __NEXT_DATA__ JSON contains a MetaCollection with one collection
+     per tab ("All", "ABC TV", "ABC Entertains"); each has a numeric
+     collection id.
+  2. https://www.abc.net.au/rage/all_playlists/<collection-id> embeds links
+     to every episode page: /rage/playlist/<slug>/<article-id>, where the
+     slug carries the air date, e.g. saturday-night-8-august-2026-on-abc-tv.
+  3. Each episode page's __NEXT_DATA__ has the tracklist as rich text under
+     documentProps.text.descriptor. Lines look like:
+         PLAYLIST 11:30pm EDDY CURRENT SUPPRESSION RING   Which Way To Go  (Shock)
+         THE B-52S   Private Idaho  (Warner)
+     i.e. optional "PLAYLIST"/time prefixes, then ARTIST and Title separated
+     by a run of 2+ spaces, with an optional trailing (Label).
 
-The ABC site has changed structure over the years (see RAGEagain's notes),
-so parsing is deliberately layered:
-
-  1. Try embedded structured data (__NEXT_DATA__ / JSON-LD) if present.
-  2. Fall back to HTML heuristics.
-
+HTML-heuristic fallbacks are kept for when the ABC changes structure again.
 All selectors and heuristics live in this one file so that when the ABC
 markup changes, this is the only file to fix. Run `python -m src.scrape`
 locally for a dry run that prints what it finds without touching Spotify.
@@ -23,15 +28,17 @@ import json
 import re
 import sys
 from dataclasses import dataclass, asdict
-from datetime import date, datetime
+from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-HUB_URL = "https://www.abc.net.au/rage/playlist"
+BASE = "https://www.abc.net.au"
+HUB_URL = f"{BASE}/rage/playlist"
+ALL_PLAYLISTS_URL = f"{BASE}/rage/all_playlists/{{collection_id}}"
 USER_AGENT = (
-    "rage-spotify-sync (+https://github.com/YOUR_USERNAME/rage-spotify-sync; "
+    "rage-spotify-sync (+https://github.com/coffeykevin/Rage-On; "
     "personal, non-commercial playlist tool)"
 )
 TIMEOUT = 30
@@ -60,53 +67,117 @@ def _get(url: str) -> requests.Response:
     return resp
 
 
+def _next_data(html: str) -> dict | None:
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Episode discovery
 # ---------------------------------------------------------------------------
 
+EPISODE_HREF = re.compile(r"/rage/playlist/[a-z0-9-]+/\d{6,}")
+
+
+def _collection_ids(hub_data: dict) -> list[str]:
+    """Collection ids from the hub's MetaCollection tabs ("All" first)."""
+    ids: list[str] = []
+    try:
+        components = hub_data["props"]["pageProps"]["data"]["componentsContent"]
+    except (KeyError, TypeError):
+        return ids
+    for comp in components:
+        for item in comp.get("componentProps", {}).get("items", []):
+            cid = str(item.get("id", ""))
+            if cid.isdigit() and cid not in ids:
+                ids.append(cid)
+    return ids
+
+
 def discover_episode_urls(hub_html: str, base_url: str = HUB_URL) -> list[str]:
-    """Find links to per-episode playlist pages on the hub page."""
-    soup = BeautifulSoup(hub_html, "html.parser")
+    """Find links to per-episode playlist pages."""
+    seen: set[str] = set()
     urls: list[str] = []
-    seen = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        # Historic pattern: /rage/archive/s1234567.htm
-        # Modern ABC article pattern: /rage/...playlist.../<numeric-id>
-        if re.search(r"/rage/.*(archive/s\d+\.htm|playlist)", href, re.I) or (
-            "/rage/" in href and re.search(r"/\d{6,}$", href)
-        ):
-            full = urljoin(base_url, href)
-            if full != base_url and full not in seen:
-                seen.add(full)
-                urls.append(full)
+
+    def add(href: str) -> None:
+        full = urljoin(base_url, href)
+        if full not in seen:
+            seen.add(full)
+            urls.append(full)
+
+    # Strategy A: hub __NEXT_DATA__ -> collection ids -> all_playlists pages,
+    # whose embedded JSON links every episode.
+    data = _next_data(hub_html)
+    if data:
+        for cid in _collection_ids(data):
+            listing_url = ALL_PLAYLISTS_URL.format(collection_id=cid)
+            try:
+                listing = _get(listing_url).text
+            except requests.RequestException as e:
+                print(f"  ! fetch failed: {listing_url}: {e}", file=sys.stderr)
+                continue
+            for href in EPISODE_HREF.findall(listing):
+                add(href)
+
+    # Strategy B: any episode-shaped links directly in the hub page.
+    for href in EPISODE_HREF.findall(hub_html):
+        add(href)
+
+    # Strategy C (legacy): anchor tags matching older patterns.
+    if not urls:
+        soup = BeautifulSoup(hub_html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if re.search(r"/rage/.*(archive/s\d+\.htm|playlist/)", href, re.I):
+                add(href)
+
     return urls
 
 
 # ---------------------------------------------------------------------------
-# Episode parsing
+# Air date
 # ---------------------------------------------------------------------------
 
-DATE_PATTERNS = [
-    "%Y-%m-%d",
-    "%d %B %Y",
-    "%A %d %B %Y",
-    "%d/%m/%Y",
-]
+SLUG_DATE = re.compile(
+    r"(\d{1,2})-(january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)-(\d{4})",
+    re.I,
+)
+
+
+def _date_from_url(url: str) -> str | None:
+    """Episode slugs embed the air date: .../saturday-night-8-august-2026-on-abc-tv/..."""
+    m = SLUG_DATE.search(url)
+    if not m:
+        return None
+    try:
+        return (
+            datetime.strptime(" ".join(m.groups()), "%d %B %Y").date().isoformat()
+        )
+    except ValueError:
+        return None
 
 
 def _parse_date(text: str) -> str | None:
     text = text.strip()
-    # ISO timestamps in metadata
     m = re.search(r"\d{4}-\d{2}-\d{2}", text)
     if m:
         return m.group(0)
-    for pat in DATE_PATTERNS:
-        try:
-            return datetime.strptime(text, pat).date().isoformat()
-        except ValueError:
-            continue
-    m = re.search(r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})", text, re.I)
+    m = re.search(
+        r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|"
+        r"September|October|November|December)\s+(\d{4})",
+        text,
+        re.I,
+    )
     if m:
         try:
             return datetime.strptime(" ".join(m.groups()), "%d %B %Y").date().isoformat()
@@ -115,12 +186,18 @@ def _parse_date(text: str) -> str | None:
     return None
 
 
-def _episode_date(soup: BeautifulSoup, url: str) -> str | None:
+def _episode_date(html: str, url: str) -> str | None:
     """Best-effort extraction of the episode's air date."""
-    # 1. Metadata tags
+    d = _date_from_url(url)
+    if d:
+        return d
+    soup = BeautifulSoup(html, "html.parser")
+    for el in soup.find_all(["h1", "title"]):
+        d = _parse_date(el.get_text(" ", strip=True))
+        if d:
+            return d
     for sel, attr in [
         ('meta[property="article:published_time"]', "content"),
-        ('meta[name="DC.date"]', "content"),
         ("time[datetime]", "datetime"),
     ]:
         el = soup.select_one(sel)
@@ -128,66 +205,113 @@ def _episode_date(soup: BeautifulSoup, url: str) -> str | None:
             d = _parse_date(el[attr])
             if d:
                 return d
-    # 2. JSON-LD
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for obj in data if isinstance(data, list) else [data]:
-            if isinstance(obj, dict) and obj.get("datePublished"):
-                d = _parse_date(str(obj["datePublished"]))
-                if d:
-                    return d
-    # 3. Date in the page heading or title
-    for el in soup.find_all(["h1", "h2", "title"]):
-        d = _parse_date(el.get_text(" ", strip=True))
-        if d:
-            return d
     return None
 
 
-# Track lines on Rage playlists are conventionally "ARTIST - Title" or
-# "Artist – Title (Label)". Uppercase artist names are common.
-TRACK_LINE = re.compile(r"^(?P<artist>[^–—\-]{1,80}?)\s+[–—\-]\s+(?P<title>.{1,120})$")
+# ---------------------------------------------------------------------------
+# Episode parsing
+# ---------------------------------------------------------------------------
 
-NOISE = re.compile(
-    r"^(rage|playlist|guest programmer|top ?50|new release|"
-    r"\d{1,2}[:.]\d{2}\s*(am|pm)?|(mon|tue|wed|thu|fri|sat|sun))",
-    re.I,
-)
+# Prefix noise on a track line: "PLAYLIST", time markers like "11:30pm".
+LINE_PREFIX = re.compile(r"^(?:playlist\b[\s:]*|\d{1,2}[:.]\d{2}\s*(?:am|pm)\b[\s:]*)+", re.I)
+# Trailing record label: "  (Shock Records)".
+TRAILING_LABEL = re.compile(r"\s*\([^()]*\)\s*$")
+# ARTIST and Title separated by a run of 2+ spaces.
+TWO_SPACE_SPLIT = re.compile(r"\s{2,}")
+# Artist annotations like "BLACK DIAMONDS, THE - Live on Be Our Guest, 1966".
+ARTIST_ANNOTATION = re.compile(r"\s+[-–—]\s+(live|recorded|from)\b.*$", re.I)
+TRAILING_THE = re.compile(r"^(?P<name>.+),\s*(?P<article>the)$", re.I)
+
+
+def _richtext_lines(descriptor: dict) -> list[str]:
+    """Flatten the rich-text tree into text lines (block/br boundaries)."""
+    lines: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        # Keep runs of spaces intact — 2+ spaces separate ARTIST from Title.
+        text = re.sub(r"[\n\r\t]+", " ", " ".join(buf)).strip()
+        buf.clear()
+        if text:
+            lines.append(text)
+
+    def walk(node: dict) -> None:
+        if node.get("type") == "text":
+            content = node.get("content")
+            if content:
+                buf.append(content.replace("\xa0", " "))
+            return
+        key = str(node.get("key", "")).lower()
+        if key == "br":
+            flush()
+        for child in node.get("children") or []:
+            walk(child)
+        if key in ("p", "h2", "h3", "li", "div"):
+            flush()
+
+    walk(descriptor)
+    flush()
+    return lines
+
+
+def _clean_artist(artist: str) -> str:
+    artist = ARTIST_ANNOTATION.sub("", artist).strip()
+    m = TRAILING_THE.match(artist)  # "BLACK DIAMONDS, THE" -> "THE BLACK DIAMONDS"
+    if m:
+        artist = f"{m.group('article')} {m.group('name')}".strip()
+    return artist
+
+
+def _track_from_line(line: str, air_date: str) -> Track | None:
+    line = LINE_PREFIX.sub("", line.replace("\xa0", " ")).strip()
+    if not line or len(line) > 200:
+        return None
+    line = TRAILING_LABEL.sub("", line)
+    parts = TWO_SPACE_SPLIT.split(line, maxsplit=1)
+    if len(parts) == 2:
+        artist, title = parts
+    else:
+        # Fallback: "ARTIST - Title" with a dash separator.
+        m = re.match(r"^(?P<artist>[^–—\-]{1,80}?)\s+[–—\-]\s+(?P<title>.{1,120})$", line)
+        if not m:
+            return None
+        artist, title = m.group("artist"), m.group("title")
+    artist = _clean_artist(artist)
+    title = TRAILING_LABEL.sub("", title).strip()
+    if not artist or not title:
+        return None
+    return Track(artist=artist, title=title, air_date=air_date)
 
 
 def parse_episode(html: str, url: str) -> list[Track]:
-    soup = BeautifulSoup(html, "html.parser")
-    air_date = _episode_date(soup, url)
+    air_date = _episode_date(html, url)
     if not air_date:
         print(f"  ! no air date found for {url}, skipping", file=sys.stderr)
         return []
 
+    lines: list[str] = []
+
+    # Strategy A: rich-text tracklist inside __NEXT_DATA__.
+    data = _next_data(html)
+    if data:
+        try:
+            descriptor = data["props"]["pageProps"]["data"]["documentProps"]["text"]["descriptor"]
+        except (KeyError, TypeError):
+            descriptor = None
+        if descriptor:
+            lines = _richtext_lines(descriptor)
+
+    # Strategy B: visible text of the rendered page.
+    if not lines:
+        soup = BeautifulSoup(html, "html.parser")
+        main = soup.select_one("main") or soup
+        lines = [ln.strip() for ln in main.get_text("\n").splitlines() if ln.strip()]
+
     tracks: list[Track] = []
     seen: set[str] = set()
-
-    # Strategy A: list items / table rows
-    candidates = [el.get_text(" ", strip=True) for el in soup.select("li, td, p")]
-    # Strategy B: raw text lines (older pages are near-plain text)
-    if len(candidates) < 5:
-        candidates = [ln.strip() for ln in soup.get_text("\n").splitlines()]
-
-    for line in candidates:
-        line = re.sub(r"\s*\((19|20)\d{2}\)\s*$", "", line)  # trailing (year)
-        line = re.sub(r"\s*\[[^\]]+\]\s*$", "", line)        # trailing [label]
-        if not line or len(line) > 200 or NOISE.match(line):
-            continue
-        m = TRACK_LINE.match(line)
-        if not m:
-            continue
-        artist = m.group("artist").strip()
-        title = re.sub(r"\s*\([^)]*\)\s*$", "", m.group("title")).strip()
-        if not artist or not title:
-            continue
-        t = Track(artist=artist, title=title, air_date=air_date)
-        if t.key not in seen:
+    for line in lines:
+        t = _track_from_line(line, air_date)
+        if t and t.key not in seen:
             seen.add(t.key)
             tracks.append(t)
     return tracks
