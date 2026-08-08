@@ -110,23 +110,26 @@ class Spotify:
             if status not in (403, 404):
                 raise
             print(f"  ! listing playlists denied ({status}); creating directly")
+        # Feb 2026 Web API migration: creation is POST /me/playlists
+        # (the old /users/{id}/playlists returns 403 for dev-mode apps).
         created = self._request(
             "POST",
-            f"/users/{self.user_id}/playlists",
+            "/me/playlists",
             json={"name": name, "public": True, "description": description},
         )
         print(f"Created playlist: {name}")
         return created["id"]
 
     def playlist_track_uris(self, playlist_id: str) -> set[str]:
+        # Feb 2026 Web API migration renamed /tracks to /items.
         uris: set[str] = set()
-        url = f"/playlists/{playlist_id}/tracks?fields=items(track(uri)),next&limit=100"
+        url = f"/playlists/{playlist_id}/items?limit=100"
         while url:
             page = self._request("GET", url)
             for item in page.get("items", []):
-                track = item.get("track") or {}
-                if track.get("uri"):
-                    uris.add(track["uri"])
+                entry = item.get("track") or item.get("item") or {}
+                if entry.get("uri"):
+                    uris.add(entry["uri"])
             url = page.get("next")
         return uris
 
@@ -134,7 +137,7 @@ class Spotify:
         for i in range(0, len(uris), 100):
             self._request(
                 "POST",
-                f"/playlists/{playlist_id}/tracks",
+                f"/playlists/{playlist_id}/items",
                 json={"uris": uris[i : i + 100]},
             )
 
