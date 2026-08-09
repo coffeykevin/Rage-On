@@ -21,6 +21,14 @@ import requests
 API = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 
+# A Retry-After beyond this means Spotify wants a long cool-down; the caller
+# should stop gracefully and let the next scheduled run resume.
+MAX_RETRY_AFTER_SECONDS = 300
+
+
+class RateLimitStall(Exception):
+    """Raised when Spotify demands a wait too long to sit out in this run."""
+
 
 class Spotify:
     def __init__(self) -> None:
@@ -68,6 +76,9 @@ class Spotify:
             )
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", "2")) + 1
+                if wait > MAX_RETRY_AFTER_SECONDS:
+                    raise RateLimitStall(f"Spotify asked for a {wait}s cool-down")
+                print(f"  … rate limited, waiting {wait}s")
                 time.sleep(wait)
                 continue
             if resp.status_code == 401:
@@ -152,6 +163,7 @@ class Spotify:
 
     def match_track(self, artist: str, title: str, threshold: float = 0.75) -> str | None:
         """Search Spotify and return the best-matching track URI, or None."""
+        time.sleep(0.2)  # be gentle; searches dominate this app's request volume
         query = f"track:{title} artist:{artist}"
         results = self._request(
             "GET", "/search", params={"q": query, "type": "track", "limit": 5}
