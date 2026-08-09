@@ -163,7 +163,7 @@ class Spotify:
 
     def match_track(self, artist: str, title: str, threshold: float = 0.75) -> str | None:
         """Search Spotify and return the best-matching track URI, or None."""
-        time.sleep(0.2)  # be gentle; searches dominate this app's request volume
+        time.sleep(0.5)  # be gentle; searches dominate this app's request volume
         query = f"track:{title} artist:{artist}"
         results = self._request(
             "GET", "/search", params={"q": query, "type": "track", "limit": 5}
