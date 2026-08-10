@@ -1,7 +1,11 @@
 {
-  "processed": {},
+  "processed": {
+    "ariana grande|petal|2026-08-13": "spotify:track:70pVCVMGjmIWPbWXDwf11e"
+  },
   "playlists": {
     "ABC Rage H2 2026": "1VsuGafhckW5ZeDUvvG2FG"
   },
-  "songs": {}
+  "songs": {
+    "ariana grande|petal": "spotify:track:70pVCVMGjmIWPbWXDwf11e"
+  }
 }
